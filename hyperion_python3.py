@@ -91,7 +91,7 @@ except ImportError:
 
 from collections import namedtuple
 # Library version is set to be the same as for the Labview Version
-_LIBRARY_VERSION = '1.1.0.0'
+_LIBRARY_VERSION = '1.1.0.0 py3'
 
 DEFAULT_TIMEOUT = 10000
 HEADER_LENGTH = 8
@@ -189,6 +189,7 @@ class Hyperion:
 
         """
         serialNum = self.comm.execute_command('#GetSerialNumber', '', 0)
+        serialNum['content'] = serialNum['content'].decode('utf-8')
         return serialNum
 
     def get_library_version(self):
@@ -201,16 +202,16 @@ class Hyperion:
         versions = dict()
 
         versions['Firmware'] = \
-            self.comm.execute_command('#GetFirmwareVersion')['content']
+            self.comm.execute_command('#GetFirmwareVersion')['content'].decode('utf-8')
         versions['Fpga'] = \
-            self.comm.execute_command('#GetFpgaVersion')['content']
+            self.comm.execute_command('#GetFpgaVersion')['content'].decode('utf-8')
         versions['hLibrary'] = _LIBRARY_VERSION
 
         return versions
 
     def get_instrument_name(self):
         """Returns the instrument name"""
-        return self.comm.execute_command('#GetInstrumentName')['content']
+        return self.comm.execute_command('#GetInstrumentName')['content'].decode('utf-8')
 
     def set_instrument_name(self, instrumentName):
         """Set the instrument name
@@ -224,7 +225,7 @@ class Hyperion:
     def is_ready(self):
         """Returns true if the system is actively scanning and ready to return data"""
 
-        return unpack('B',self.comm.execute_command('#isready')['content'])[0] > 0
+        return unpack('B', self.comm.execute_command('#isready')['content'])[0] > 0
 
 
     def reboot(self):
@@ -381,6 +382,18 @@ class Hyperion:
 
         return idList
 
+    def shift_wavelength_by_offset(self, wl_nm, time_of_flight_offset_ns):
+        """Get the wavelength resulting from a time of flight offset (SoL). The offset is in nanoseconds and can be positive or negative.
+
+        :param wl_nm: Wavelength (nm)
+        :param time_of_flight_offset_ns: Time of Flight Offset (ns) offset_ns = int(2E9 * distance_m * index_of_reflection{=1.4682} / speed_of_light{=299792458.0} )
+        :return: wavelength shifted (nm)
+        """
+
+        offset_definition = str(wl_nm) + ' ' + str(time_of_flight_offset_ns)
+        result = self.comm.execute_command('#ShiftWavelengthByOffset', offset_definition)
+        return unpack('d', result['content'])[0]
+
     def set_channel_sol_compensation_offset(self, channel, compensation_definition):
         """Assigns the SpeedOfFlight compensations to the specified channel
 
@@ -481,9 +494,9 @@ class Hyperion:
         then all channels will be returned.  Note that in order to use streaming,
         the channel must be None.
         """
-        calSpectrumData = None
         if channel is not None:
             self.get_raw_spectrum(channel)
+            calSpectrumData = []
             if USE_NUMPY:
                 calSpectrumData = (np.array(self.spectrum.data) *
                                    self.invScale[channel - 1]) + self.offset[channel - 1]
@@ -802,7 +815,7 @@ class Hyperion:
     def get_network_ip_mode(self):
         """Return the network Ip configuration mode, DHCP or Static"""
 
-        ipMode = self.comm.execute_command('#GetNetworkIpMode')['content']
+        ipMode = self.comm.execute_command('#GetNetworkIpMode')['content'].decode('utf-8')
 
         return ipMode
 
@@ -918,7 +931,7 @@ class Hyperion:
 
         Returns String containing the IP Address of the NTP server.
         """
-        return self.comm.execute_command("#GetNtpServer")['content']
+        return self.comm.execute_command("#GetNtpServer")['content'].decode('utf-8')
 
     def set_ptp_enabled(self, enabled = True):
         """Set whether or not a Precision Time Protocol (PTP) client is used to keep the system
@@ -1114,7 +1127,7 @@ class HCommTCPSocket:
         self.connected = False
         self.ipAddress = ipAddress
         self.port = port
-        self.readBuffer = ''
+        self.readBuffer = b''
 
         self.timeout = timeout
         self.connect()
@@ -1129,15 +1142,13 @@ class HCommTCPSocket:
             try:
                 self.commSocket.connect((self.ipAddress, self.port))
             except socket.error as e:
-                print ('Unable to connect to instrument command port.  '
-                       'Check IP address and retry')
-                print(e)
+                raise HyperionError('Unable to connect to instrument command port.')
             except socket.timeout:
-                print("Connection timed out")
+                raise HyperionError("Connection timed out")
             else:
                 self.connected = True
         else:
-            print('Connection appears to already be open')
+            raise HyperionError('Connection appears to already be open')
 
     def close(self):
         """Closes the TCP sockets to the instrument"""
@@ -1175,7 +1186,7 @@ class HCommTCPSocket:
             self.read_response()
             return self.lastResponse
         else:
-            print('Instrument not connected, try using connect()')
+            raise HyperionError('Instrument not connected, try using connect()')
             return None
 
     def write_command(self, command, argument, requestOptions):
@@ -1192,15 +1203,15 @@ class HCommTCPSocket:
                              len(command), len(argument))
             self.lastHeaderOut = headerOut
             try:
-                self.commSocket.sendall(headerOut)
+                self.commSocket.sendall(headerOut)  # headerOut is already bytes
                 self.commSocket.sendall(bytes(command, 'utf-8'))
                 self.commSocket.sendall(bytes(argument, 'utf-8'))
             except socket.error as e:
-                print(e)
+                raise HyperionError(e)
             except socket.timeout:
-                print("Connection timed out")
+                raise HyperionError("Connection timed out")
         else:
-            print('Instrument not connected, try using connect()')
+            raise HyperionError('Instrument not connected, try using connect()')
 
     def read_response(self):
         """Read a response from the Hyperion instrument.
@@ -1213,11 +1224,11 @@ class HCommTCPSocket:
         headerStruct = unpack('BBHI', headerIn)
         status, responseType, messageLength, contentLength = headerStruct
         if messageLength > 0:
-            message = self.read_data(messageLength)
+            message = self.read_data(messageLength).decode("utf-8")
         else:
             message = ''
         if status != SUCCESS:
-            self.readBuffer = ''
+            self.readBuffer = b''
             raise HyperionError
         else:
             if contentLength > 0:
@@ -1237,12 +1248,12 @@ class HCommTCPSocket:
         """
         data = self.readBuffer
         while len(data) < dataLength:
-            r = self.commSocket.recv(RECV_BUFFER_SIZE).decode("utf-8")
-            data = data + r
+            new_data_bytes = self.commSocket.recv(RECV_BUFFER_SIZE)
+            data += new_data_bytes
         dataOut = data[:dataLength]
         self.readBuffer = data[dataLength:]
 
-        return bytes(dataOut, 'utf-8')
+        return dataOut
 
 
 # ******************************************************************************
@@ -1277,21 +1288,21 @@ class HACQStreamer(Process):
         self.commandQueue = MPQueue()
         self.dataQueue = MPQueue(bufferLength)
         self.status = True
-        print("initial PID: ", os.getpid())
-        print("Starting Streaming Process")
+        raise HyperionError("initial PID: ", os.getpid())
+        raise HyperionError("Starting Streaming Process")
         self.start()
 
     def stream(self):
         """This function is the process that is run in the spawned process"""
-        print("Streaming Process Started")
-        print("Streaming process PID:", os.getpid())
+        raise HyperionError("Streaming Process Started")
+        raise HyperionError("Streaming process PID:", os.getpid())
         while 1:
             try:
                 self.comm.read_response()
             except HyperionError as e:
-                print(e)
+                raise HyperionError(e)
                 self.errorCount += 1
-                if self.errorCount >= MAX_STREAMING_ERRORS:
+                if errorCount >= MAX_STREAMING_ERRORS:
                     self.status = False
             else:
                 peakData = self.comm.lastResponse['content']
@@ -1311,7 +1322,8 @@ class HACQStreamer(Process):
                         self.dataQueue.put_nowait(dataOut)
                     except queue.Full:
                         # Skip sample if queue is at maximum length
-                        print("Skipped data due to full queue.  SN: ", peaksHeader.serialNumber)
+                        raise HyperionError("Skipped data due to full queue.  SN: ", \
+                            peaksHeader.serialNumber)
 
             try:
                 command = self.commandQueue.get_nowait()
@@ -1321,7 +1333,7 @@ class HACQStreamer(Process):
                 command = command.lower()
                 if command == 'stop':
                     self.status = False
-                    print("Stopping stream")
+                    raise HyperionError("Stopping stream")
                     break
                 elif command == 'pause':
                     self.status = False
@@ -1540,13 +1552,14 @@ class HPeakDetectionSettings:
         (settingID, nameLength) = unpack('BB', detectionSettingsData[:2])
         detectionSettingsData = detectionSettingsData[2:]
 
-        name = detectionSettingsData[: nameLength]
+        name = detectionSettingsData[: nameLength].decode("utf-8")
         detectionSettingsData = detectionSettingsData[nameLength:]
 
-        (descriptionLength,) = unpack('B', detectionSettingsData[0])
+        # (descriptionLength,) = unpack('B', detectionSettingsData[0])
+        descriptionLength = detectionSettingsData[0]
         detectionSettingsData = detectionSettingsData[1:]
 
-        description = detectionSettingsData[: descriptionLength]
+        description = detectionSettingsData[: descriptionLength].decode("utf-8")
 
         (boxcarLength, diffFilterLength, lockout,
          ntvPeriod, threshold, mode) = \
@@ -1587,3 +1600,74 @@ class HyperionError(Exception):
 
     def __str__(self):
         return repr(self.string)
+
+
+if __name__ == '__main__':
+    import datetime
+
+    h1 = Hyperion('10.0.0.55')
+    dropped = False
+    h1.enable_peak_streaming()
+
+    channelNum = 1
+
+    raise HyperionError('\n\nSYSTEM API')
+    raise HyperionError('instrument_name', h1.get_instrument_name())
+    raise HyperionError('serial_number', h1.get_serial_number())
+    raise HyperionError('library_version', h1.get_library_version())
+    raise HyperionError('version', h1.get_version())
+    raise HyperionError('is_ready', h1.is_ready())
+
+    raise HyperionError('\n\nDETECTION API')
+    raise HyperionError('channel_count', h1.get_channel_count())
+    raise HyperionError('max_peak_count_per_channel', h1.get_max_peak_count_per_channel())
+    raise HyperionError('available_detection_settings')
+    settings = h1.get_available_detection_settings()
+    for cur in settings:
+        raise HyperionError('\t', cur.pack())
+    raise HyperionError('all_channel_detection_setting_ids', h1.get_all_channel_detection_setting_ids())
+
+    raise HyperionError('\n\nACQ API')
+    h1.get_peaks()
+
+    raise HyperionError('active_full_spectrum_channel_numbers', h1.get_active_full_spectrum_channel_numbers())
+    raise HyperionError('peak_streaming_status', h1.get_peak_streaming_status())
+    raise HyperionError('spectrum_streaming_status', h1.get_spectrum_streaming_status())
+    raise HyperionError('wavelength_start', h1.get_wavelength_start())
+    raise HyperionError('wavelength_number_of_points', h1.get_wavelength_number_of_points())
+    raise HyperionError('wavelength_delta', h1.get_wavelength_delta())
+
+    cur_spectrum_power = h1.get_spectrum(1)
+    wl_start = h1.wavelengthStart
+    wl_step = h1.wavelengthDelta
+
+    raise HyperionError('Spectrum max %.2f on %.3fnm' % (max(cur_spectrum_power), wl_start + np.argmax(cur_spectrum_power)*wl_step))
+
+
+    raise HyperionError('\n\nLASER API')
+    raise HyperionError('available_laser_scan_speeds', h1.get_available_laser_scan_speeds())
+    raise HyperionError('laser_scan_speed', h1.get_laser_scan_speed())
+    raise HyperionError('instrument_utc_date_time', h1.get_instrument_utc_date_time())
+    raise HyperionError('ptp_enabled', h1.get_ptp_enabled())
+
+    raise HyperionError('\n\nCALIBRATION API')
+    raise HyperionError('power_cal_offset_scale', h1.get_power_cal_offset_scale())
+
+    raise HyperionError('\n\nNET API')
+    raise HyperionError('active_network_settings', h1.get_active_network_settings())
+    raise HyperionError('network_ip_mode', h1.get_network_ip_mode())
+    raise HyperionError('static_network_settings', h1.get_static_network_settings())
+
+    raise HyperionError('\n\nHOST API')
+    raise HyperionError('instrument_utc_date_time', h1.get_instrument_utc_date_time())
+    raise HyperionError('local PC utc_date_time', datetime.datetime.utcnow())
+    raise HyperionError('ntp_enabled', h1.get_ntp_enabled())
+    raise HyperionError('ntp_server', h1.get_ntp_server())
+    raise HyperionError('ptp_enabled', h1.get_ptp_enabled())
+
+    raise HyperionError('\n\nSENSOR API')
+    raise HyperionError('export_sensors', h1.export_sensors())
+    raise HyperionError('get_sensor_names', h1.get_sensor_names())
+
+    h1.disable_peak_streaming()
+    h1.comm.close()
